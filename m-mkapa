@@ -1,0 +1,810 @@
+#!/biometrics/global/gpythonvenv/bin/python3
+######### start of header ######################################
+# Program Name:  m-mkapa.py
+# Author:        Lawrence Sleeper (lsleeper)
+# Description:   Python Script to create validation spreadsheet
+# Category:      Utility
+# Macros called: 
+# Parameter:                
+# Usage:         m-mkapa
+#                                                                       
+# Change History: 
+#      2019-02-14  lsleeper - Original programming    
+#			 2019-05-06	 lsleeper - Fix bug when matching outputs to validation programs
+#	     2019-05-29  lsleeper - Update to use shebang (#!) to point to virtual env (See line 1)
+# 		 2019-08-16  lsleeper - Use tnf.inc as master list for output section
+#			 2019-08-16	 lsleeper - Add traffic lighting and warnings for missing output and 
+#														  programming timestamps greater than validation timestamps
+#      2019-08-22  lsleeper - Fill in Study/Compound and Programming Task in cover page in APA spreadsheet
+#			 2019-11-12	 lsleeper - Take seconds out of timestamps 
+#		 	 2020-02-04	 lsleeper - Rewrite with pandas
+########## end of header ###########################################/
+
+import glob
+import os
+import xlsxwriter
+import argparse
+import re
+from datetime import datetime
+import pandas as pd
+
+# Parse command line arguments
+parser = argparse.ArgumentParser(description='Collate information from SP folder into apa validation spreadsheet')
+parser.add_argument('-x','--xlsname',		help='File name of output file without .xlsx extension.  DEFAULT is task-release-apa.xlsx')
+
+args = parser.parse_args()
+
+# get current working directory and set up project, task and release strings
+cwd      = os.getcwd()
+cwd_comp = cwd.split('/');
+if os.path.exists('../prog'): 
+		print ('In or at same level as prog folder')  
+		dotdot='/..'     
+		study	   = cwd_comp[-5]
+		project  = cwd_comp[-4]
+		task     = cwd_comp[-3]
+		release  = cwd_comp[-2]		
+elif os.path.exists('prog'):              
+		print ('At version level folder')
+		dotdot=''
+		study	   = cwd_comp[-4]		
+		project  = cwd_comp[-3]
+		task     = cwd_comp[-2]
+		release  = cwd_comp[-1]		
+else:
+		print ('Cannot find ../prog or prog folder. Run from directory at same level as prog, prog itself, or from one level above prog')
+		exit();
+
+# naming convention for xlsx: GS-US-XXX-XXX-Task-APA
+if (args.xlsname):
+		dstname=args.xlsname+'.xlsx'
+else:
+		dstname="GS-US-"+project+"-"+task+"-APA.xlsx";
+		
+# set paths to folders with datasets and output 
+sdtm_ds_dir    = cwd + dotdot + '/sdtmdata/'   
+sdtm_prog_dir  = cwd + dotdot + '/sdtmprog/'
+adam_ds_dir    = cwd + dotdot + '/adamdata/'
+adam_prog_dir  = cwd + dotdot + '/adamprog/'
+prog_dir       = cwd + dotdot + '/prog/'
+validation_dir = cwd + dotdot + '/validation/'
+legacy_dir     = cwd + dotdot + '/adata/'
+intext_dir		 = cwd + dotdot + '/intext/'
+export_dir     = cwd + dotdot + '/export/'
+tools_dir      = cwd + dotdot + '/tools/'
+
+# function to parse programmer userid id from SAS program
+def get_programmer_id(filename):
+		if os.path.exists(filename):
+				# open SAS program and parse out programmer id
+				userid = ''
+				with open(filename,'r',encoding='windows-1252') as f:		
+						for line in f:
+								# look for line with "Program Author" in string
+								ucline=line.upper()
+								if ucline.find("PROGRAM AUTHOR:") != -1 and line.find("(") != -1 and line.find(")") != -1:
+										# userid will be inside parenthesis
+										# print (filename, line)
+										userid=line.split('(', 1)[1].split(')')[0].strip()
+										break
+
+				return userid
+		else:
+				print ('File does not exist: ', filename)
+
+# function to return last modified date from a file in ISO format				
+def get_iso_timestamp(filename):
+		if os.path.exists(filename):
+				dt=datetime.fromtimestamp(os.path.getmtime(filename)).replace(microsecond=0)
+				return dt.strftime("%Y-%m-%dT%H:%M")
+				
+###########    SDTM section  #############
+		
+# search SDTM dataset dir for SAS datasets
+sdtm_data = glob.glob(sdtm_ds_dir+'*.sas7bdat')
+sdtm_data.sort()
+
+# create list of non SUPP datasets
+ds = [elem for elem in sdtm_data if elem.find("supp") == -1]
+
+# create list of SUPP datasets
+suppds = [elem for elem in sdtm_data if elem.find("supp") != -1]
+
+# append non SUPP datasets with SUPP datasets. Point is to have SUPP datasets show up at bottom of list
+allds = ds + suppds
+
+finalds=[]			  # initialize a list for datasets in order of placement in spreadsheet
+ds_timestamp={}   # initialize a dictionary for dataset last modified date
+output_type={}    # initialize a dictionary for output type
+val_method={}		  # initialize a dictionary for validation method
+
+for dataset in allds:
+	
+		# parse dataset name from full path and file extension
+		dsname=dataset.split('/')
+		dsstr=dsname[-1].replace('.sas7bdat','')
+		
+		# append to master list of datasets
+		finalds.append(dsstr)
+		output_type[dsstr]='SDTM'	
+		val_method[dsstr]='IP, LC'
+		
+		# create dictionary entry for timestamp of dataset
+		ds_timestamp[dsstr]=get_iso_timestamp(dataset)
+		
+# search SDTM program dir for SAS Programs
+programs = glob.glob(sdtm_prog_dir+'*.sas')
+
+output_dict={}		  # initialize a dictionary for production program names
+prog_author={}			# initialize a dictionary for programmer author name from program file
+
+for prog in programs:
+	
+		# parse sas program name from full path and file extension
+		progname=prog.split('/')
+		progstr=progname[-1].replace('.sas','')
+		dskey=progstr.split('-')[0]
+		
+		# attempt to match SDTM program to SDTM dataset
+		if dskey in finalds:
+				if dskey not in output_dict:
+						output_dict[dskey]=progstr
+				else:
+						output_dict[dskey]=progstr + ', ' + output_dict[dskey]
+				prog_author[dskey]=get_programmer_id(prog)						
+				
+		# attempt to match SDTM program to SUPP dataset
+		dskey='supp'+dskey
+		if dskey in finalds:
+				if dskey not in output_dict:
+						output_dict[dskey]=progstr
+				else:
+						output_dict[dskey]=progstr + ', ' + output_dict[dskey]
+				prog_author[dskey]=get_programmer_id(prog)						
+
+###########    ADAM section  #############
+
+# search ADAM dataset dir for SAS datasets
+adam_data = glob.glob(adam_ds_dir+'*.sas7bdat')
+adam_data.sort()
+
+for dataset in adam_data:
+	
+		# parse dataset name from full path and file extension
+		dsname=dataset.split('/')
+		dsstr=dsname[-1].replace('.sas7bdat','')
+		
+		# append to master list of output
+		finalds.append(dsstr)
+		output_type[dsstr]='ADAM'			
+		val_method[dsstr]='IP, LC'
+
+		# create dictionary entry for timestamp of dataset
+
+		ds_timestamp[dsstr]=get_iso_timestamp(dataset)
+
+# search ADAM program dir for SAS Programs
+programs = glob.glob(adam_prog_dir+'*.sas')
+
+for prog in programs:
+	
+		# parse sas program name from full path and file extension
+		progname=prog.split('/')
+		progstr=progname[-1].replace('.sas','')
+		dskey=progstr.split('-')[-1]
+
+		# attempt to match ADAM program to ADAM dataset
+		if dskey in finalds:
+				if dskey not in output_dict:
+						output_dict[dskey]=progstr
+				else:
+						output_dict[dskey]=progstr + ', ' + output_dict[dskey]
+				prog_author[dskey]=get_programmer_id(prog)					
+
+###########   TLF output section  #############
+
+# create list of tlf output names by parsing tnf.inc file
+tnf_inc_file=tools_dir + 'tnf.inc'
+tnf_tlf=[]
+if os.path.exists(tnf_inc_file):
+		with open(tnf_inc_file,'r',encoding='windows-1252') as f:		
+				for line in f:
+						output_list=re.findall(r'[tlg]-[-\w]+',line)						
+						if len(output_list)>0:
+								this_tlf=output_list[0]
+								if this_tlf not in tnf_tlf:
+										tnf_tlf.append(this_tlf)
+else:
+		print ('ERROR: no tnf.inc file in tools folder');
+		exit()     
+		
+tnf_tlf.sort()
+		
+#print (tnf_tlf)
+		
+# prefixes of TLF output programs
+prefixes = ('t-','l-','g-')
+
+# prefixes of TLF validation programs
+val_prefixes = ('v-t-','v-l-','v-g-')
+
+# get list of all programs in prog_dir
+programs = glob.glob(prog_dir+'*.sas')
+prognames = []
+# strip path and .sas extension from programs list and create new list prognames
+for prog in programs:
+		progname=prog.split('/')
+		dskey=progname[-1].replace('.sas','')
+		# subset list to only have programs that start with t-, l-, or g-
+		if dskey.startswith(tuple(prefixes)):	
+				prognames.append(dskey)
+
+# get list of all validation programs in validation_dir
+val_programs = glob.glob(validation_dir+'*.sas')
+val_prognames = []
+# strip path, v-,  and .sas extension from programs list and create new list val_prognames	
+for valprog in val_programs:
+		progname=valprog.split('/')
+		dskey=progname[-1].replace('.sas','')
+		# subset list to only have programs that start with v-t-, v-l-, or v-g-
+		if dskey.startswith(tuple(val_prefixes)):
+				dskey=dskey.replace('v-','')
+				val_prognames.append(dskey)
+#print (val_prognames)
+
+# initialize a dictionary for production program names, authors, and timestamps
+val_prog_dict={}		  
+val_ds_prog={}
+val_timestamp={}
+
+# search TLF program dir for PDF output that begins with t-, l-, or g-
+tlf_pdf = glob.glob(prog_dir+'*.pdf')
+tlf_pdf.sort()
+
+for dskey in tnf_tlf:	
+					
+		# append to master list of output				
+		finalds.append(dskey)	
+		output_type[dskey]='TFL'
+		if dskey.startswith('l-s-') or dskey.startswith('t-s-'):
+				val_method[dskey]='MR, FC, LC'
+		elif dskey.startswith('g-'):
+				val_method[dskey]='CC, FC, LC'
+		elif dskey.startswith('l-'):
+				val_method[dskey]='CR, FC, LC'
+		elif dskey.startswith('t-'): 
+				val_method[dskey]='IP, FC, LC'	
+				
+		# create dictionary entry for timestamp of pdf
+		pdf=prog_dir+dskey+'.pdf'
+		#print (pdf)
+		ds_timestamp[dskey]=get_iso_timestamp(pdf)
+		#print (ds_timestamp[dskey])
+
+		# match production programs to output
+				
+		# Method: If you have an output named t-qschg-facit-sub-hscrp,
+		#		First look for a program named t-qschg-facit-sub-hscrp
+		#		Then look for a program named t-qschg-facit-sub 
+		#		Then look for a program named t-qschg-facit
+		#		Finally look for a program named t-qschg
+
+		output=dskey;
+		found=0
+		while found==0:
+				newlist = [ prog for prog in prognames if prog == output]
+				if newlist:
+						matched_prog=prog_dir+newlist[0]+'.sas'
+						#print ('Matched ', matched_prog, ' to ', dskey)
+														
+						if dskey not in output_dict:
+								output_dict[dskey]=newlist[0]
+								
+								prog_author[dskey]=get_programmer_id(matched_prog)	
+								break;
+				else:
+						# no match found, split off next piece of output name until only 2 pieces left
+						pieces=output.split('-')
+						if len(pieces)>=3:
+								output=output.rsplit('-',1)[0];
+						else:
+								#print ('No program match for TNF.INC specified output name', dskey)  
+								# only 2 pieces left, no match found
+								break
+											
+		# match validation programs to output
+													
+		output=dskey;
+			
+		found=0
+		while found==0:
+				#print ('Looking to match validation program for',output)
+				newlist = [ prog for prog in val_prognames if prog == output]
+				if newlist:
+
+						matched_prog=validation_dir+'v-'+newlist[0]+'.sas'
+						#print ('Matched ', matched_prog, ' to ', dskey)
+																
+						if dskey not in val_prog_dict:
+								val_prog_dict[dskey]='v-'+newlist[0]
+								
+								# get validation programmer author
+								val_ds_prog[dskey]=get_programmer_id(matched_prog)	
+								
+								# get timestamp of validation program log
+								val_timestamp[dskey]=get_iso_timestamp(matched_prog.replace('.sas','.log'))
+									
+								break;
+				else:
+						# no match found, split off next piece of output name until only 2 pieces left			
+						pieces=output.split('-')								
+						if len(pieces)>=3:																			
+								output=output.rsplit('-',1)[0];
+						else:
+								# only 2 pieces left, no match found
+								break		
+									
+###########    LEGACY (adata) section  #############
+
+# search legacy (adata) dir for SAS datasets
+legacy_data = glob.glob(legacy_dir+'*.sas7bdat')
+legacy_data.sort()
+
+for dataset in legacy_data:
+	
+		# parse dataset name from full path and file extension
+		dsname=dataset.split('/')
+		dsstr=dsname[-1].replace('.sas7bdat','')
+		
+		# append to master list of output
+		if dsstr not in finalds:
+				finalds.append(dsstr)
+				output_type[dsstr]='LEGACY'		
+								
+				# create dictionary entry for timestamp of dataset
+				ds_timestamp[dsstr]=get_iso_timestamp(dataset)
+
+# search prog dir for SAS Programs
+programs = glob.glob(prog_dir+'*.sas')
+
+for prog in programs:
+	
+		# parse sas program name from full path and file extension
+		progname=prog.split('/')
+		progstr=progname[-1].replace('.sas','')
+		dskey=progstr
+
+		# attempt to match legacy program to legacy (adata) dataset
+		if dskey in finalds:
+				if dskey not in output_dict:
+						output_dict[dskey]=progstr
+						prog_author[dskey]=get_programmer_id(prog)
+				else:
+						if output_type[dskey]=='LEGACY':
+								output_dict[dskey]=progstr + ', ' + output_dict[dskey]
+								prog_author[dskey]=get_programmer_id(prog)					
+
+###########    INTEXT section  #############
+
+# search intext dir for RTF files
+intext_rtf = glob.glob(intext_dir+'*.rtf')
+intext_rtf.sort()
+
+for rtf in intext_rtf:
+	
+		# parse dataset name from full path and file extension
+		rtfname=rtf.split('/')
+		dsstr=rtfname[-1].replace('.rtf','')
+		
+		# append to master list of output
+		finalds.append(dsstr)
+		output_type[dsstr]='INTEXT'		
+		val_method[dsstr]='CC, FC, LC'
+							
+		# create dictionary entry for timestamp of dataset
+		ds_timestamp[dsstr]=get_iso_timestamp(rtf)
+
+# search intext dir for SAS Programs
+programs = glob.glob(intext_dir+'*.sas')
+
+for prog in programs:
+	
+		# parse sas program name from full path and file extension
+		progname=prog.split('/')
+		progstr=progname[-1].replace('.sas','')
+		dskey=progstr
+
+		# attempt to match intext program to rtf
+		if dskey in finalds:
+				if dskey not in output_dict:
+						output_dict[dskey]=progstr
+				else:
+						output_dict[dskey]=progstr + ', ' + output_dict[dskey]
+				prog_author[dskey]=get_programmer_id(prog)		
+											
+###########    EXPORT section  #############
+
+# search export dir for SAS files
+export_pgm = glob.glob(export_dir+'*.sas')
+export_pgm.sort()
+
+for prog in export_pgm:
+	
+		# parse dataset name from full path and file extension
+		progname=prog.split('/')
+		dskey=progname[-1]
+		
+		# append to master list of output
+		finalds.append(dskey)
+		output_type[dskey]='EXPORT'		
+		output_dict[dskey]=dskey
+							
+		# create dictionary entry for timestamp of dataset
+		ds_timestamp[dskey]=get_iso_timestamp(prog)
+			
+###########    TOOLS section   #############
+
+# search export dir for SAS files
+tools_pgm = glob.glob(tools_dir+'*.sas')
+inc_pgm = glob.glob(tools_dir+'*.inc');
+tools_pgm = tools_pgm + inc_pgm;
+tools_pgm.sort()
+
+for prog in tools_pgm:
+	
+		# parse dataset name from full path and file extension
+		progname=prog.split('/')
+		dskey=progname[-1]
+		
+		# append to master list of output
+		finalds.append(dskey)
+		output_type[dskey]='TOOLS'	
+		output_dict[dskey]=dskey;	
+							
+		# create dictionary entry for timestamp of dataset
+		ds_timestamp[dskey]=get_iso_timestamp(prog)
+		
+###########    Validation section  #############	
+		
+# search intext dir for SAS Programs
+programs = glob.glob(validation_dir+'*.sas')
+
+for prog in programs:
+	
+		# parse sas program name from full path and file extension
+		progname=prog.split('/')
+		progstr=progname[-1].replace('.sas','')
+		
+		dskey=progstr.replace('v-a-','')
+		dskey=dskey.replace('v-','')
+			
+		if not (dskey.startswith(tuple(prefixes))):
+		
+				#print ('Attempting to match ', dskey);
+				
+				# attempt to match validation program to a dataset if not a TLF validation progra
+				if dskey in finalds:
+								
+						if dskey not in val_prog_dict:
+								val_prog_dict[dskey]=progstr
+						else:
+								val_prog_dict[dskey]=progstr + ', ' + val_prog_dict[dskey]			
+									
+						# open SAS program and parse out programmer id
+						val_ds_prog[dskey]=get_programmer_id(prog)
+						
+						# get timestamp of validation program log
+						val_timestamp[dskey]=get_iso_timestamp(prog.replace('.sas','.log'))
+		
+				# attempt to match validation program to a supp dataset
+				dskey='supp'+dskey;
+				if dskey in finalds:
+								
+						if dskey not in val_prog_dict:
+								val_prog_dict[dskey]=progstr
+						else:
+								val_prog_dict[dskey]=progstr + ', ' + val_prog_dict[dskey]			
+									
+						# open SAS program and parse out programmer id
+						val_ds_prog[dskey]=get_programmer_id(prog)
+						
+						# get timestamp of validation program log
+						val_timestamp[dskey]=get_iso_timestamp(prog.replace('.sas','.log'))
+						
+# function to standardize page setup for worksheets since we have 2 worksheets				
+def setup_worksheet(worksheet, text):
+
+		# Set page orientation
+		worksheet.set_landscape()
+		
+		# Add header and footer text
+		header1 = '&LGilead' + '&CAnalysis Program Acceptance\n\n' + text + '&RRepresentative of GT-27030A (2.0)'
+		
+		footer1 = '&LCreated on &D &T' + '&CCONFIDENTIAL INFORMATION\n' + 'Gilead Sciences, Inc. Foster City, CA 94404' + '&RPage &P of &N'
+		worksheet.set_header(header1)
+		worksheet.set_footer(footer1)
+		
+		worksheet.merge_range('A1:B1','', merge_format)
+		worksheet.write('A1', 'Study/Compound:', header_format)
+		worksheet.merge_range('C1:I1','', merge_format)		
+		worksheet.write('C1', study, merge_format)
+				
+		worksheet.merge_range('A2:B2','', merge_format)		
+		worksheet.write('A2', 'Programming Task:', header_format)
+		worksheet.merge_range('C2:I2','', merge_format)
+		worksheet.write('C2', project, merge_format)		
+				
+		worksheet.merge_range('A3:B3','', merge_format)				
+		worksheet.write('A3', 'Task Folder Name:', header_format)
+		worksheet.merge_range('C3:I3','', merge_format)
+		worksheet.write('C3', task, merge_format)
+						
+		worksheet.merge_range('A4:B4','', merge_format)				
+		worksheet.write('A4', 'Release Version:', header_format)	
+		worksheet.merge_range('C4:I4','', merge_format)
+		worksheet.write('C4', release, merge_format)
+						
+						
+#### 	CREATE APA SPREADSHEET WITH XLSXWRITER ####	
+def write_worksheet():	
+		# Create an new Excel file.
+		workbook = xlsxwriter.Workbook(dstname)
+		
+		# default cell format to size 8 
+		workbook.formats[0].set_font_size(8)
+		
+		# Add a header format.
+		global header_format
+		header_format = workbook.add_format({
+		    'bold': False,
+		    'text_wrap': True,
+		    'valign': 'top',
+		    'fg_color': 'silver',
+		    'border': 1})
+		    	
+		# Add a header format.
+		global merge_format
+		merge_format = workbook.add_format({
+		    'bold': False,
+		    'text_wrap': False,
+		    'valign': 'top',
+		    'fg_color': 'white',    	
+		    'border': 1})    	
+		
+		# Add a format for warnings    	
+		global warning_format
+		warning_fmt = workbook.add_format({
+		    'bold':     False,
+		    'border':   1,
+		    'align':    'center',
+		    'valign':   'vcenter',
+		    'bg_color': 'yellow',
+		    })
+		    
+		# Add a format for error    
+		global error_format	
+		error_fmt = workbook.add_format({
+		    'bold':     False,
+		    'border':   1,
+		    'align':    'center',
+		    'valign':   'vcenter',
+		    'bg_color': 'red',
+		    })
+		    
+		# Add cover page worksheet to workbook
+		cover_worksheet = workbook.add_worksheet('Cover Page')
+		setup_worksheet(cover_worksheet,'Cover Page')
+		
+		# Add validation worksheet to workbook
+		val_worksheet = workbook.add_worksheet('Validation')
+		setup_worksheet(val_worksheet,'Validation')
+		
+		# Repeat the first row when printing
+		val_worksheet.repeat_rows(5)
+		
+		# Freeze the header row.
+		val_worksheet.freeze_panes(6, 0)
+		
+		# Widen the first column to make the text clearer.
+		cover_worksheet.set_column('A:A', 20)
+		val_worksheet.set_column('A:A', 20)
+		val_worksheet.set_column('B:B', 20)
+		val_worksheet.set_column('C:C', 15)
+		val_worksheet.set_column('D:D', 20)
+		val_worksheet.set_column('E:E', 15)
+		val_worksheet.set_column('F:F', 20)
+		val_worksheet.set_column('G:G', 15)
+		val_worksheet.set_column('H:H', 20)
+		val_worksheet.set_column('I:I', 10)
+		val_worksheet.set_column('J:J', 100)
+			
+		# Column headings
+		val_worksheet.write('A6', 'Output Description', header_format)
+		val_worksheet.write('B6', 'Program Name', header_format)
+		val_worksheet.write('C6', 'Validation Method', header_format)
+		val_worksheet.write('D6', 'Validation Program Name', header_format)
+		val_worksheet.write('E6', 'Production Programmer UserID', header_format)
+		val_worksheet.write('F6', 'Production Date(/Time)', header_format)
+		val_worksheet.write('G6', 'Validation Programmer UserID', header_format)
+		val_worksheet.write('H6', 'Validation Date(/Time)', header_format)
+		val_worksheet.write('I6', 'Section', header_format)
+		val_worksheet.write('J6', 'Diagnostics', header_format)
+		
+		# Add conditional format for warnings
+		val_worksheet.conditional_format('A1:J10000', {'type': 'formula',
+		                                          'criteria': '=LEFT($J1, 8)="WARNING:"',
+		                                          'format': warning_fmt})
+		# Add conditional format for errors
+		val_worksheet.conditional_format('A1:J10000', {'type': 'formula',
+		                                          'criteria': '=LEFT($J1, 6)="ERROR:"',
+		                                          'format': error_fmt})
+		
+		# Write info out to spreadsheet							  
+		count = 6
+		for output in finalds:
+			
+				count = count + 1;
+				dsname=output.split('/')
+				dsstr=dsname[-1]
+				
+				# reset program name variable for diagnostics
+				progname=''
+				# reset timestamp variables
+				prod_ts=''
+				val_ts=''
+				
+				# column A - output name for all sections but tools
+				if output_type[dsstr] != 'TOOLS':
+						val_worksheet.write('A'+str(count), dsstr)	
+						
+				# column B - program name
+				if dsstr in output_dict:
+						progname=output_dict[dsstr]
+						val_worksheet.write('B'+str(count), progname)
+					
+				# column C - validation method
+				if dsstr in val_method:
+						val_worksheet.write('C'+str(count), val_method[dsstr])
+			
+				# column D - validation program name
+				if dsstr in val_prog_dict:
+						if dskey in output_type and output_type[dskey]=='INTEXT':
+								val_worksheet.write('D'+str(count), "n//a" )
+						else:
+								val_prog=val_prog_dict[dsstr]
+								val_worksheet.write('D'+str(count), val_prog )
+		
+				# column E - production program programmer userid
+				if dsstr in prog_author:
+						val_worksheet.write('E'+str(count), prog_author[dsstr])
+		
+				# column F - production program timestamp
+				if dsstr in ds_timestamp:
+						prod_ts=ds_timestamp[dsstr]
+						val_worksheet.write('F'+str(count), prod_ts)
+						
+				# column G - validation program programmer userid
+				if dsstr in val_ds_prog:
+						val_worksheet.write('G'+str(count), val_ds_prog[dsstr])
+		
+				# column H - validation program timestamp
+				if dsstr in val_timestamp:
+						val_ts=val_timestamp[dsstr]
+						val_worksheet.write('H'+str(count), val_ts)
+						
+				# column I - Output Type
+				if dsstr in output_type:
+						val_worksheet.write('I'+str(count), output_type[dsstr])
+		
+				# column J - Diagnostics and Traffic Lighting
+				if output_type[dsstr] in ['TFL']:
+						if progname == '':
+								if prod_ts == '':
+										val_worksheet.write('J'+str(count), 'ERROR: TNF.INC named PDF file does not exist')							
+								else:
+										val_worksheet.write('J'+str(count), 'ERROR: TNF.INC named PDF file exists but cannot be matched to a production TFL program')				
+						elif dsstr not in val_prog_dict:
+								val_worksheet.write('J'+str(count), 'WARNING: A validation program cannot be matched to output PDF file')
+						elif val_ts == '':								
+								val_worksheet.write('J'+str(count), 'WARNING: A Validation log file does not exist')
+								
+				if prod_ts is not None and val_ts is not None and val_ts != '' and prod_ts > val_ts:
+								val_worksheet.write('J'+str(count), 'WARNING: Production timestamp greater than Validation timestamp')
+				
+		val_worksheet.autofilter('A6:J5000')
+							
+		workbook.close()
+		
+		print ('Created apa spreadsheet ' + dstname + ' in current directory')
+
+
+
+def populate_dataframe():
+	
+		# create pandas dataframe to hold all information
+		df = pd.DataFrame(columns = ['Output Name', 'Program Name', 'Validation Method', 'Validation Program Name',
+			'Production Programmer UserID', 'Production Date(/Time)', 'Validation Programmer UserID', 'Validation Date(/Time)',
+			'Comments', 'Section', 'Diagnostics']) 
+
+		for output in finalds:
+			
+				dsname=output.split('/')
+				dsstr=dsname[-1]
+											
+				# output name for all sections but tools
+				output_name=''
+				if output_type[dsstr] != 'TOOLS':
+						output_name=dsstr
+						
+				# Program name
+				progname=''
+				if dsstr in output_dict:
+						progname=output_dict[dsstr]
+					
+				# Validation method
+				valmethod=''
+				if dsstr in val_method:
+						valmethod=val_method[dsstr]
+			
+				# Validation program name
+				valprog=''
+				if dsstr in val_prog_dict:
+						if dskey in output_type and output_type[dskey]=='INTEXT':
+								valprog='n//a'
+						else:
+								valprog=val_prog_dict[dsstr]
+															
+				# Production program programmer userid
+				prog_auth='';
+				if dsstr in prog_author:
+						prog_auth=prog_author[dsstr]
+		
+				# Production program timestamp
+				prod_ts='';
+				if dsstr in ds_timestamp:
+						prod_ts=ds_timestamp[dsstr]
+						
+				# Validation program programmer userid
+				val_auth=''
+				if dsstr in val_ds_prog:
+						val_auth=val_ds_prog[dsstr]
+		
+				# Validation program timestamp
+				val_ts=''
+				if dsstr in val_timestamp:
+						val_ts=val_timestamp[dsstr]
+						
+				# Comments
+				comments=''
+						
+				# output type
+				out_type='';
+				if dsstr in output_type:
+						out_type=output_type[dsstr]
+						
+				# diagnostics
+				diagnostics=''
+								
+				df = df.append(pd.Series([dsstr, progname, valmethod, valprog, prog_auth, prod_ts, val_auth, val_ts, comments, out_type, diagnostics], index=df.columns ), ignore_index=True)				
+				
+		print (df.head())
+		
+		# Create a Pandas Excel writer using XlsxWriter as the engine.
+		writer = pd.ExcelWriter('pandas_simple.xlsx', engine='xlsxwriter')
+		
+		# Convert the dataframe to an XlsxWriter Excel object.
+		df.to_excel(writer, sheet_name='Validation')
+		
+		# Get the xlsxwriter objects from the dataframe writer object.
+		workbook  = writer.book
+		worksheet = writer.sheets['Sheet1']
+		
+		workbok.close()
+
+#write_worksheet()
+
+populate_dataframe()
+
+'''
+
+'''                                  
