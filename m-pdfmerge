@@ -1,0 +1,379 @@
+#!/biometrics/global/gpythonvenv/bin/python3
+######### start of header ######################################
+# Program Name:  m-pdfmerge.py
+# Author:        Larry Sleeper (lsleeper)
+# Description:   Python Script to combine PDF files into one PDF file in the order of TNF file
+#                with bookmarks.   
+# Category:      Utility
+# Macros called: 
+# Parameter:                
+# Usage:         pdfmerge.sh -a -q
+#                                                                       
+# Change History: 
+#      2019-02-04  lsleeper - Original programming)   
+#			 2019-05-29  lsleeper - Update to use shebang (#!) to activate virtual env (See line 1)	 
+#			 2019-08-19  lsleeper - Added sys.setrecursionlimit(1500) to prevent recursion limit messages	 
+#			    Work from any directory at prog folder level	 
+#			 		Default to get pdf file from ../prog folder. Default to get tnf file from ../tools folder
+#         When using -a option, include all t-/l-/g-/r-*.pdf files so it works on adhoc studies
+#      2019-08-29	lsleeper - Switch to PyMuPDF from PyPDF4 to merge PDFs.  It's much faster and doesn't 
+#         raise Recursion Limit Exceptions
+#		   2019-09-13	 lsleeper - Save with saveIncr() method to make compatible with PyMuPDF 1.16.1
+#			 2019-09-23  lsleeper - Fix bookmark title issue when PDFs exist in TOC but not in PDF dir
+#		   2019-09-24  lsleeper	- Add HTML TOC functionality
+#			 2019-12-18	 lsleeper - Listing missing files at end of run.
+# 		 2020-02-14	 lsleeper - Remove check to ensure running at prog folder level or version folder level 
+########## end of header ###########################################/
+
+import glob, sys, argparse, os.path, subprocess, re
+from PyPDF4 import PdfFileMerger
+import fitz
+from xlrd import open_workbook
+from datetime import datetime
+
+# Parse command line arguments
+parser = argparse.ArgumentParser(description='Combine specified PDF files into one bookmarked PDF that will be written to current directory ')
+parser.add_argument('-p','--pdfname',		help='File name of output file without .pdf extension')
+parser.add_argument('-a','--all', 			help='Merge all pdf files in current directory in toc.txt (default output PDF name pdfall)', action='store_true')
+parser.add_argument('-t','--tables', 		help='Tables only (default output PDF name tables)', action='store_true')
+parser.add_argument('-l','--listings', 	help='Listings only (default output PDF name listings)', action='store_true')
+parser.add_argument('-f','--figures', 	help='Figures only (same as -g, default output PDF name figures)', action='store_true')
+parser.add_argument('-g','--graphs', 		help='Graphs only (default output PDF name graphs)', action='store_true')
+parser.add_argument('-r','--tfls', 			help='Adhoc request files (default  output PDF name tfls)', action='store_true')
+parser.add_argument('-q','--quick', 		help='Quick index without TOC or TNF file', action='store_true')
+parser.add_argument('-s','--single',		help='Single page output', action='store_true')
+parser.add_argument('-m','--maxpage',		help='Maximum page per input file')
+parser.add_argument('-x','--xlsname',		help='File name of tnf spreadsheet file without .xls extension')
+parser.add_argument('-i','--alternate', help='Specify name of alternate toc.txt without .txt extension')
+parser.add_argument('-d','--directory',	help='Input PDF file directory')
+parser.add_argument('-w','--webtoc',	  help='Produce webtoc HMTL table of contents', action='store_true')
+parser.add_argument('-z','--header',	  help='Header text in double quotes for webtoc HMTL table of contents (e.g. "DRUG for the Treatment of INDICATION")')
+
+args = parser.parse_args()
+					
+# Function to merge PDFs from a list
+def merger(output_path, input_paths, titles, maxpage):
+		
+		# use PyPDF4 to create a PDF that opens by default with bookmarks displayed
+		pdf_merger = PdfFileMerger()
+		pdf_merger.setPageMode('/UseOutlines');	
+		
+		# save PDF to file system
+		output_pdf=output_path+'.pdf'		
+		with open(output_pdf, 'wb') as fh:
+				pdf_merger.write(fh)
+		
+		# open PDF created above with PyMuPDF (fitz)
+		newpdf = fitz.open(output_pdf)		
+		toc=newpdf.getToC();    
+
+		count=0
+		merged=0
+		tot_pages=0
+		missing_files=[]
+
+		# Spin thru all PDF files to be merged
+		for pdf in input_paths:			
+				
+				# Make sure PDF file exists
+				if os.path.exists(pdfdir + pdf):
+						merged=merged+1
+						# Get text for table of contents if it exists
+						if titles:
+								#print (count, titles[count])
+								bookmark_txt=titles[count]
+						else:
+								bookmark_txt=pdf	
+								
+						pdf_reader = fitz.open(pdfdir+pdf)
+						
+						# append to Table of Cotnets, [Level 1, TLF number and title, page to jump to]						
+						toc.append([1, bookmark_txt, tot_pages+1])                 
+						num_pages = pdf_reader.pageCount
+						
+						if (args.maxpage or args.single) and num_pages > int(maxpage):
+								# insert only part of PDF into new document if single or maxpage args specified
+								print ('Adding ', maxpage, ' pages from ', pdf, ' title=( ' + bookmark_txt + ').')						
+								tot_pages=tot_pages + int(maxpage)										
+								newpdf.insertPDF(pdf_reader, to_page = int(maxpage))
+						else:
+								# insert all of PDF into new document
+								print ('Adding ', num_pages, ' pages from ', pdf, ' title=( ' + bookmark_txt + ').')														
+								tot_pages=tot_pages + num_pages		
+								newpdf.insertPDF(pdf_reader)
+				else:
+						missing_files.append(pdf)
+						
+				count=count+1	
+
+		print ('Merged ', merged, ' files to ', output_pdf, '. Page total is ', tot_pages)
+		
+		if len(missing_files) != 0:
+				print ('WARNINGS:');
+				for misspdf in missing_files:
+						print (misspdf, ' exists in TOC but PDF does not exist in directory ', pdfdir)
+
+		# Set Table of Contents and save
+		newpdf.setToC(toc)
+		newpdf.saveIncr()
+						
+# Function to convert XLS file to a TOC.TXT file by calling global macro %m_tnfconvert
+def call_tnfconvert(xlsname):
+	
+		print ('Converting ' + xlsname + ' to a temporary TOC.txt file....')
+		
+		# create temp SAS program to call global macro %m_tnfconvert
+		with open('tmp_tnfconvert.sas','w') as sasprog:
+				sasprog.write("%m_tnfconv(in="+xlsname+",tnf=tmp_tnfconvert.inc,toc=tmp_toc.txt);")
+		
+		# call temp SAS program
+		subprocess.call('mgsub -l . tmp_tnfconvert.sas',shell=True)
+		
+		if not os.path.isfile('tmp_toc.txt'):
+				print ('Cannot create TOC file from XLS file '+xlsname)
+				exit(1)
+		else:
+				delete_files(['tmp_convert.log','tmp_tnfconvert.out']);
+
+# Function to delete a list of files
+def delete_files(files_to_delete):
+		for file in files_to_delete:					
+				if os.path.isfile(file):
+						os.remove(file)
+
+# function to return last modified date from a file in ISO format				
+def get_iso_timestamp(filename):
+		if os.path.exists(filename):
+				dt=datetime.fromtimestamp(os.path.getmtime(filename)).replace(microsecond=0)
+				return dt.isoformat()
+
+# Function to produce HTML toc
+def html_toc(output_path, input_paths, pdf_numbers, pdf_desc):
+	
+		html_top = """
+			<html>
+			<!--
+			    Gilead Sciences
+			    Desc: Navigation menu for viewing TFLs for Study 
+			 -->
+			<head>
+			<title>Gilead Sciences: Study GS-US-{study}-{project}</title>
+			<h1 align=center>Gilead Sciences</h1>
+			<h2 align=center>{headertext}</h2>
+			<h2 align=center>Study GS-US-{study}-{project}</h2>
+			<h2 align=center>{includes} ({task} {release})</h2>
+			</head>
+			<body bgcolor="#ffffff" text="#000000" link="#ff0000" vlink="#800000" alink="#ff00ff">
+			<div align=center>
+			<table border="1" cellspacing="0" cellpadding="2">
+			<tr><td>
+			<table width="100%" border="0" cellspacing="4" cellpadding="1">
+			<thead bgcolor="#dddddd">
+			  <tr valign="top">
+			    <td align=center colspan=4>&nbsp;Item&nbsp;</td>
+			    <td align=center>&nbsp;Output File&nbsp;</td>
+			    <td align=center colspan=2>&nbsp;Date&nbsp;</td>
+			  </tr>
+			</thead>
+			<tbody>
+		""".format(headertext=args.header,study=study,project=project,task=task,release=release,includes=includes)
+		
+		now = datetime.now()
+		created = now.strftime("%m/%d/%Y %H:%M")		
+
+		html_bot="""
+			</tbody>
+			</table>
+			</td></tr></table>
+			</div>
+			<p>
+			</body>
+			<address>
+			<hr><font size=-1>Gilead Sciences Confidential: Page created {created}</font>
+			</address>
+			</html>
+		""".format(created=created)
+
+		count=0
+		merged=0
+		missing_files=[]
+		
+		# Write HTML String to file.html
+		with open("toc.html", "w") as file:
+				file.write(html_top)
+    		
+				# Spin thru all PDF files to be merged
+				for pdf in input_paths:			
+					
+						merged=merged+1
+														
+						# Get output number
+						if pdf_numbers:
+								number=pdf_numbers[count]
+						else:
+								number=''
+								
+						# Get output description
+						if pdf_desc:
+								desc=pdf_desc[count]
+						else:
+								desc=''
+	
+						file.write('</tr>\n')
+						file.write('	<tr valign="top">\n')
+
+						# if PDF file exists make table number linkable to pdf						
+						if os.path.exists(pdfdir + pdf):		
+								timestamp=get_iso_timestamp(pdfdir + pdf)									
+								lhref='  <td nowrap><a href="'+pdfdir+pdf+'" target=target'+str(count)+'>'+number+'</a></td>\n'
+						else:
+								missing_files.append(pdf)
+								lhref='  <td nowrap> '+number+'</td>\n'
+								timestamp=''
+							
+						file.write(lhref)
+						file.write('  <td> </td>\n')
+						ldesc='  <td>'+desc+'</td>\n'
+						file.write(ldesc)
+						file.write('  <td> </td>\n')
+						file.write('  <td align=left>&nbsp;'+pdf+'&nbsp;</td>\n')
+						file.write('  <td align=right nowrap>'+timestamp+'</td>\n')
+						file.write('</tr>\n')
+								
+								
+						count=count+1	
+						
+				file.write(html_bot)
+
+		print ('Added ', merged, ' files to toc.html file in current directory')
+				
+		if len(missing_files) != 0:				
+				print ('WARNINGS:');
+				for misspdf in missing_files:
+						print (misspdf, ' exists in TOC but PDF does not exist in directory ', pdfdir)
+		
+
+	
+#### Main Body of Program
+
+# set up PATT and DSTNAME variables
+patt=[]
+dstname='pdfall'
+pdfdir = '../prog/'
+maxpage=0
+includes='Tables, Listing, and Figures'
+
+if (args.graphs):
+		patt.append('g');
+		dstname='graphs'
+		includes='Figures'
+if (args.figures):
+		patt.append('g');
+		dstname='figures'	
+		includes='Figures'		
+if (args.tables):
+		patt.append('t')
+		dstname='tables'		
+		includes='Tables'		
+if (args.listings):
+		patt.append('l')
+		dstname='listings'		
+		includes='Listing'		
+if (args.tfls):
+		patt.append('r')
+		dstname='tfls'		
+if (args.all):
+		dstname='pdfall'			
+if (args.pdfname):
+		dstname=args.pdfname
+if (args.xlsname):
+		xlsname=args.xlsname
+		if not xlsname.endswith('.xls'):
+				xlsname=args.xlsname+'.xls';		
+		if not (os.path.exists(xlsname)):
+				print ('TNF Spreadsheet ' + xlsname + '.xls specified in -x parameter does not exist')
+				exit(1)
+if (args.single):
+		maxpage=1
+if (args.maxpage):
+		maxpage=args.maxpage
+if (args.header):
+		maxpage=args.header
+if (args.directory):
+		pdfdir=args.directory;
+		if not pdfdir.endswith('/'):
+				pdfdir=args.directory+'/';
+		if not (os.path.isdir(pdfdir)):
+				print ('Directory ' + pdfdir + ' specified in -d parameter does not exist')
+				exit(1)
+if (args.alternate):
+		tocfile=args.alternate;	
+		if not tocfile.endswith('.txt'):
+				tocfile=args.alternate+'.txt';
+		if not (os.path.isfile(tocfile)):
+				print ('Alternate TOC file ' + tocfile + ' specified in -i parameter does not exist')
+				exit(1)
+				
+# Default to all option if nothing else specified;
+if (not args.graphs and not args.figures and not args.tables and not args.listings and not args.all and not args.pdfname):
+		print ('Defaulting to all')
+		args.all=True
+		dstname='pdfall'
+
+		
+# delete destination PDF if it already exists
+if (os.path.isfile(dstname+'.pdf')):
+		os.remove(dstname+'.pdf')
+
+if (args.alternate):	
+		print("Using alternate TOC file ", tocfile)
+elif (args.xlsname):
+		call_tnfconvert(xlsname)
+		tocfile='tmp_toc.txt'
+elif (os.path.exists('./toc.txt')):
+		tocfile='./toc.txt'	
+elif (os.path.exists('../tools/toc.txt')):		
+		tocfile='../tools/toc.txt'
+elif (not args.xlsname and os.path.exists('../tools/tnf.xls')):		
+		xlsname='../tools/tnf.xls'
+		call_tnfconvert(xlsname)
+		tocfile='tmp_toc.txt'
+else:
+		if (not args.quick):
+				print ('Cannot find toc.txt file in current or ../tools directory or tnf.xls in ../tools directory')
+				print ('PDFMerge needs to be run from prog/statprog or directory of the same level');
+				exit(1)
+
+pdf_files=[]
+pdf_titles=[]
+pdf_numbers=[]
+pdf_desc=[]
+if (args.quick):
+		# Quick mode - merge all pdfs in a directory, no need for a toc.txt	
+		pdf_files = glob.glob(pdfdir+'*.pdf')
+		pdf_files.sort()
+		
+else:	
+		# merge all PDF files from a TOC.txt file that start with PATT
+		print ('tocfile=' + tocfile)
+		with open(tocfile,'r',encoding='windows-1252') as f:		
+				for line in f:
+						if line.find(".pdf"):
+								if ((args.all and line.startswith(("t","l","g","r"))) or line.startswith(tuple(patt))):
+										pdf_files.append(line.split(" ")[0])
+										split = re.split("[ \t]{2,}",line)
+										#print (split[1], split[2])
+										tlf_num=split[1]
+										tlf_title=split[2].rstrip()
+										pdf_titles.append(tlf_num+", "+tlf_title)
+										pdf_numbers.append(tlf_num)
+										pdf_desc.append(tlf_title)
+
+if args.webtoc:
+		html_toc(dstname, pdf_files, pdf_numbers, pdf_desc)
+else:     								   								
+		if len(pdf_files) > 0:
+				merger(dstname, pdf_files, pdf_titles, maxpage)
+		else:
+				print ('No PDF files found to combine in directory', pdfdir)
+		
